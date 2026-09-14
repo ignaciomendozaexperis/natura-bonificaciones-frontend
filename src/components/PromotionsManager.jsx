@@ -1,258 +1,375 @@
-import { useState } from 'react'
-import { PlusCircle, ShieldAlert, CheckCircle2, ChevronDown, ChevronUp, Code2, Trash2 } from 'lucide-react'
-import { mockPromotions, STORES_LIST } from '../data/mockData.js'
-import StatusBadge from './StatusBadge.jsx'
+import { useState } from 'react';
+import {
+  PlusCircle,
+  Upload,
+  Code2,
+  ChevronDown,
+  ChevronUp,
+  FileSpreadsheet,
+  CheckCircle2,
+} from 'lucide-react';
+import * as XLSX from 'xlsx';
 
-const EMPTY_FORM = {
-  nombre: '',
-  tipo: 'Descuento porcentual',
-  descuento: '',
-  fechaInicio: '',
-  fechaFin: '',
-  tiendasAplicables: [],
-  estado: 'Borrador',
-}
-
-function validatePromotions(promotions) {
-  return promotions.map((p) => {
-    const errores = []
-
-    if (p.fechaInicio && p.fechaFin && new Date(p.fechaInicio) > new Date(p.fechaFin)) {
-      errores.push('Fecha de inicio posterior a la fecha de fin.')
-    }
-    if (p.tipo === 'Descuento porcentual' && (p.descuento <= 0 || p.descuento > 70)) {
-      errores.push('Porcentaje de descuento fuera de límite permitido (1%-70%).')
-    }
-    if (p.tipo === 'Descuento fijo' && p.descuento <= 0) {
-      errores.push('Monto de descuento fijo debe ser mayor a 0.')
-    }
-    if (!p.tiendasAplicables || p.tiendasAplicables.length === 0) {
-      errores.push('No se han asignado tiendas aplicables.')
-    }
-
-    return { ...p, errores, valida: errores.length === 0 }
-  })
-}
+const MOCK_COUPONS = [
+  {
+    id: 'CUP-001',
+    codigo: 'VERANO2026',
+    tipo: 'Porcentaje',
+    valor: '20%',
+    limite: 500,
+    estado: 'Activo',
+  },
+  {
+    id: 'CUP-002',
+    codigo: 'BIENVENIDA10',
+    tipo: 'Monto Fijo',
+    valor: '$10.000',
+    limite: 100,
+    estado: 'Activo',
+  },
+];
 
 export default function PromotionsManager() {
-  const [promotions, setPromotions] = useState(mockPromotions)
-  const [form, setForm] = useState(EMPTY_FORM)
-  const [validated, setValidated] = useState(null)
-  const [jsonOpen, setJsonOpen] = useState(false)
+  const [mode, setMode] = useState('individual');
+  const [coupons, setCoupons] = useState(MOCK_COUPONS);
+  const [jsonOpen, setJsonOpen] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState(null);
 
-  function toggleStore(store) {
-    setForm((f) => ({
-      ...f,
-      tiendasAplicables: f.tiendasAplicables.includes(store)
-        ? f.tiendasAplicables.filter((s) => s !== store)
-        : [...f.tiendasAplicables, store],
-    }))
+  const [form, setForm] = useState({
+    codigo: '',
+    tipo: 'Porcentaje',
+    valor: '',
+    limite: '',
+  });
+
+  // Carga Individual Manual
+  function handleIndividualSubmit(e) {
+    e.preventDefault();
+    if (!form.codigo) return;
+    const newCoupon = {
+      id: `CUP-00${coupons.length + 1}`,
+      codigo: form.codigo.toUpperCase(),
+      tipo: form.tipo,
+      valor: form.tipo === 'Porcentaje' ? `${form.valor}%` : `$${form.valor}`,
+      limite: form.limite || 'Sin límite',
+      estado: 'Activo',
+    };
+    setCoupons([newCoupon, ...coupons]);
+    setForm({ codigo: '', tipo: 'Porcentaje', valor: '', limite: '' });
   }
 
-  function handleAddPromotion(e) {
-    e.preventDefault()
-    if (!form.nombre) return
-    const newPromo = {
-      ...form,
-      id: `PROMO-${String(promotions.length + 1).padStart(3, '0')}`,
-      descuento: Number(form.descuento) || 0,
-    }
-    setPromotions((prev) => [...prev, newPromo])
-    setForm(EMPTY_FORM)
-    setValidated(null)
-  }
+  // Lector de Archivos con Búsqueda Inteligente de Cabeceras
+  function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
 
-  function handleRemove(id) {
-    setPromotions((prev) => prev.filter((p) => p.id !== id))
-    setValidated(null)
-  }
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = XLSX.utils.sheet_to_json(ws);
 
-  function handleValidate() {
-    setValidated(validatePromotions(promotions))
-  }
+        if (!data || data.length === 0) {
+          setUploadMessage('El archivo está vacío o no tiene filas válidas.');
+          return;
+        }
 
-  const displayList = validated || promotions.map((p) => ({ ...p, errores: [], valida: true }))
-  const totalErrors = displayList.reduce((sum, p) => sum + p.errores.length, 0)
+        const cleanStr = (str) =>
+          String(str || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, '')
+            .trim();
+
+        // Búsqueda flexible que admite coincidencia parcial en cabeceras largas
+        const getVal = (row, candidateKeys) => {
+          const keys = Object.keys(row);
+          for (const cand of candidateKeys) {
+            const candClean = cleanStr(cand);
+            const foundKey = keys.find((k) => {
+              const keyClean = cleanStr(k);
+              return (
+                keyClean === candClean ||
+                keyClean.includes(candClean) ||
+                candClean.includes(keyClean)
+              );
+            });
+            if (
+              foundKey &&
+              row[foundKey] !== undefined &&
+              row[foundKey] !== null &&
+              String(row[foundKey]).trim() !== ''
+            ) {
+              return String(row[foundKey]).trim();
+            }
+          }
+          return null;
+        };
+
+        const formatValor = (rawValor, tipoStr, row) => {
+          let val = rawValor;
+          const isMontoFijo =
+            cleanStr(tipoStr).includes('monto') ||
+            cleanStr(tipoStr).includes('fijo');
+
+          // Si es Monto Fijo y no vino valor de descuento, busca en el campo de Tope Máximo
+          if (!val && isMontoFijo) {
+            val = getVal(row, ['topemaximo', 'tope', 'monto']);
+          }
+
+          if (!val) return isMontoFijo ? '$0' : '0%';
+
+          const num = parseFloat(String(val).replace(/[^0-9.-]/g, ''));
+
+          if (isMontoFijo) {
+            if (!isNaN(num)) return `$${num.toLocaleString('es-CL')}`;
+            return String(val).startsWith('$') ? val : `$${val}`;
+          } else {
+            if (!isNaN(num)) {
+              if (num > 0 && num <= 1) return `${Math.round(num * 100)}%`;
+              return `${num}%`;
+            }
+            return String(val).includes('%') ? val : `${val}%`;
+          }
+        };
+
+        const nuevosCupones = [];
+
+        data.forEach((row) => {
+          // 1. Filtrar filas cuya mecánica sea "Promoción" (sin cupón)
+          const mecanica = getVal(row, ['mecanica']) || '';
+          if (cleanStr(mecanica) === 'promocion') return;
+
+          // 2. Extraer Código de Cupón de forma estricta
+          const codigo = getVal(row, [
+            'codigocupon',
+            'codigo',
+            'cupon',
+            'code',
+          ]);
+          if (!codigo) return;
+
+          const codigoClean = codigo.toUpperCase();
+          const yaEnTabla = coupons.some(
+            (c) => c.codigo.toUpperCase() === codigoClean
+          );
+          const yaEnNuevos = nuevosCupones.some(
+            (c) => c.codigo.toUpperCase() === codigoClean
+          );
+
+          if (!yaEnTabla && !yaEnNuevos) {
+            const tipo =
+              getVal(row, ['tipodescuento', 'tipo', 'mecanica']) ||
+              'Porcentaje';
+            const rawValor = getVal(row, [
+              'porcentajedescuento',
+              'valor',
+              'descuento',
+              'monto',
+              'montofijo',
+            ]);
+
+            nuevosCupones.push({
+              id: `CUP-${coupons.length + nuevosCupones.length + 1}`,
+              codigo: codigoClean,
+              tipo: cleanStr(tipo).includes('monto')
+                ? 'Monto Fijo'
+                : 'Porcentaje',
+              valor: formatValor(rawValor, tipo, row),
+              limite:
+                getVal(row, ['topemaximo', 'tope', 'limite', 'limiteuso']) ||
+                'Sin límite',
+              estado: 'Activo',
+            });
+          }
+        });
+
+        if (nuevosCupones.length === 0) {
+          setUploadMessage(
+            'No se agregaron cupones nuevos (las promociones sin código fueron ignoradas).'
+          );
+        } else {
+          setCoupons((prev) => [...nuevosCupones, ...prev]);
+          setUploadMessage(
+            `¡Éxito! Se importaron ${nuevosCupones.length} cupones reales correctamente.`
+          );
+        }
+      } catch (err) {
+        console.error('Error al procesar archivo:', err);
+        setUploadMessage(
+          'Error al leer el archivo. Asegúrate de que sea .xlsx, .xls o .csv'
+        );
+      }
+    };
+    reader.readAsBinaryString(file);
+  }
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-slate-900">Gestor y Validador de Promociones</h1>
-        <p className="text-sm text-slate-500">Crea campañas comerciales y valida su lógica antes de publicarlas.</p>
+        <h1 className="text-xl font-semibold text-slate-900">
+          Módulo de Carga de Cupones
+        </h1>
+        <p className="text-sm text-slate-500">
+          Gestión de cupones de descuento individuales y masivos.
+        </p>
+      </div>
+
+      <div className="flex gap-2 border-b border-slate-200 pb-3">
+        <button
+          onClick={() => {
+            setMode('individual');
+            setUploadMessage(null);
+          }}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+            mode === 'individual'
+              ? 'bg-indigo-600 text-white'
+              : 'bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          <PlusCircle size={16} /> Carga Individual
+        </button>
+        <button
+          onClick={() => {
+            setMode('colectivo');
+            setUploadMessage(null);
+          }}
+          className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+            mode === 'colectivo'
+              ? 'bg-indigo-600 text-white'
+              : 'bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          <Upload size={16} /> Carga Colectiva (Excel/CSV)
+        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <form
-          onSubmit={handleAddPromotion}
-          className="space-y-4 rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200 lg:col-span-1"
-        >
-          <p className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-            <PlusCircle size={16} className="text-indigo-600" /> Nueva promoción
-          </p>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">Nombre de campaña</label>
-            <input
-              required
-              value={form.nombre}
-              onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-              placeholder="Ej: Semana Fragancias"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">Tipo de descuento</label>
-            <select
-              value={form.tipo}
-              onChange={(e) => setForm({ ...form, tipo: e.target.value })}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            >
-              <option>Descuento porcentual</option>
-              <option>Descuento fijo</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">
-              {form.tipo === 'Descuento porcentual' ? 'Porcentaje (%)' : 'Monto fijo ($)'}
-            </label>
-            <input
-              type="number"
-              value={form.descuento}
-              onChange={(e) => setForm({ ...form, descuento: e.target.value })}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-500">Fecha inicio</label>
-              <input
-                type="date"
-                value={form.fechaInicio}
-                onChange={(e) => setForm({ ...form, fechaInicio: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-slate-500">Fecha fin</label>
-              <input
-                type="date"
-                value={form.fechaFin}
-                onChange={(e) => setForm({ ...form, fechaFin: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-slate-500">Tiendas aplicables</label>
-            <div className="flex flex-wrap gap-2">
-              {STORES_LIST.map((s) => (
-                <button
-                  type="button"
-                  key={s}
-                  onClick={() => toggleStore(s)}
-                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                    form.tiendasAplicables.includes(s)
-                      ? 'border-indigo-600 bg-indigo-600 text-white'
-                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                  }`}
+        <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200 lg:col-span-1">
+          {mode === 'individual' ? (
+            <form onSubmit={handleIndividualSubmit} className="space-y-4">
+              <p className="text-sm font-semibold text-slate-700">
+                Nuevo Cupón Individual
+              </p>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-500">
+                  Código del Cupón
+                </label>
+                <input
+                  required
+                  value={form.codigo}
+                  onChange={(e) => setForm({ ...form, codigo: e.target.value })}
+                  placeholder="Ej: BDAY2026"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-500">
+                  Tipo de Descuento
+                </label>
+                <select
+                  value={form.tipo}
+                  onChange={(e) => setForm({ ...form, tipo: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <button
-            type="submit"
-            className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700"
-          >
-            Agregar promoción
-          </button>
-        </form>
-
-        <div className="space-y-4 lg:col-span-2">
-          <div className="flex items-center justify-between rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <div>
-              <p className="text-sm font-semibold text-slate-700">Campañas registradas</p>
-              <p className="text-xs text-slate-400">{promotions.length} promociones en el sistema</p>
-            </div>
-            <button
-              onClick={handleValidate}
-              className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-            >
-              <ShieldAlert size={16} />
-              Validar Lógica
-            </button>
-          </div>
-
-          {validated && (
-            <div
-              className={`flex items-center gap-2 rounded-lg px-4 py-3 text-sm ${
-                totalErrors === 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
-              }`}
-            >
-              {totalErrors === 0 ? <CheckCircle2 size={16} /> : <ShieldAlert size={16} />}
-              {totalErrors === 0
-                ? 'Todas las promociones pasaron la validación de reglas.'
-                : `Se encontraron ${totalErrors} inconsistencia(s) en las promociones. Revisa el detalle abajo.`}
+                  <option>Porcentaje</option>
+                  <option>Monto Fijo</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-500">
+                  Valor
+                </label>
+                <input
+                  required
+                  type="number"
+                  value={form.valor}
+                  onChange={(e) => setForm({ ...form, valor: e.target.value })}
+                  placeholder={
+                    form.tipo === 'Porcentaje' ? 'Ej: 15 (%)' : 'Ej: 5000 ($)'
+                  }
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700"
+              >
+                Guardar Cupón
+              </button>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-sm font-semibold text-slate-700">
+                Carga Masiva de Archivo
+              </p>
+              <label className="flex flex-col items-center justify-center cursor-pointer rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:bg-slate-50">
+                <FileSpreadsheet className="mb-2 text-indigo-600" size={32} />
+                <p className="text-xs font-medium text-slate-700">
+                  Selecciona tu Excel (.xlsx) o CSV
+                </p>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Haz clic aquí para examinar archivos
+                </p>
+                <input
+                  type="file"
+                  accept=".xlsx, .xls, .csv"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+              </label>
+              {uploadMessage && (
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-xs font-medium text-emerald-700">
+                  <CheckCircle2 size={16} />
+                  {uploadMessage}
+                </div>
+              )}
             </div>
           )}
+        </div>
 
-          <div className="space-y-3">
-            {displayList.map((p) => (
-              <div key={p.id} className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-xs font-medium text-slate-400">{p.id}</p>
-                    <p className="text-sm font-semibold text-slate-900">{p.nombre}</p>
-                    <p className="text-xs text-slate-500">
-                      {p.tipo} · {p.tipo === 'Descuento porcentual' ? `${p.descuento}%` : `$${p.descuento}`} ·{' '}
-                      {p.fechaInicio || '—'} a {p.fechaFin || '—'}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge status={p.estado} />
-                    <button
-                      onClick={() => handleRemove(p.id)}
-                      className="rounded-lg p-1.5 text-slate-300 hover:bg-slate-50 hover:text-rose-500"
-                      title="Eliminar"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </div>
+        <div className="space-y-4 lg:col-span-2">
+          <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <p className="text-sm font-semibold text-slate-700">
+              Cupones Registrados ({coupons.length})
+            </p>
+          </div>
 
-                {p.tiendasAplicables?.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {p.tiendasAplicables.map((s) => (
-                      <span key={s} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">
-                        {s}
+          <div className="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500 uppercase">
+                  <th className="px-4 py-3">Código</th>
+                  <th className="px-4 py-3">Tipo</th>
+                  <th className="px-4 py-3">Valor</th>
+                  <th className="px-4 py-3">Límite Uso</th>
+                  <th className="px-4 py-3">Estado</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {coupons.map((c) => (
+                  <tr key={c.id}>
+                    <td className="px-4 py-3 font-mono font-semibold text-indigo-600">
+                      {c.codigo}
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">{c.tipo}</td>
+                    <td className="px-4 py-3 font-medium text-slate-900">
+                      {c.valor}
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">{c.limite}</td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                        {c.estado}
                       </span>
-                    ))}
-                  </div>
-                )}
-
-                {validated && p.errores.length > 0 && (
-                  <ul className="mt-3 space-y-1 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">
-                    {p.errores.map((err, i) => (
-                      <li key={i} className="flex items-start gap-1.5">
-                        <ShieldAlert size={12} className="mt-0.5 shrink-0" />
-                        {err}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))}
-            {displayList.length === 0 && (
-              <p className="rounded-xl bg-white p-6 text-center text-sm text-slate-400 shadow-sm ring-1 ring-slate-200">
-                No hay promociones registradas.
-              </p>
-            )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           <div className="rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
@@ -261,19 +378,19 @@ export default function PromotionsManager() {
               className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-slate-700"
             >
               <span className="flex items-center gap-2">
-                <Code2 size={16} className="text-indigo-600" />
-                Visor JSON (simulador de API)
+                <Code2 size={16} className="text-indigo-600" /> Visor JSON
+                resultante para API
               </span>
               {jsonOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             </button>
             {jsonOpen && (
               <pre className="overflow-x-auto border-t border-slate-200 bg-slate-900 px-4 py-4 text-xs text-emerald-300">
-                {JSON.stringify(promotions, null, 2)}
+                {JSON.stringify(coupons, null, 2)}
               </pre>
             )}
           </div>
         </div>
       </div>
     </div>
-  )
+  );
 }
