@@ -2,3 +2,6 @@ node_modules
 dist
 .DS_Store
 *.local
+
+# Configuracion local de Claude Code
+.claude/
