@@ -7,83 +7,257 @@ import {
   ChevronUp,
   FileSpreadsheet,
   CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
-// Quita tildes/diacríticos para que el JSON de salida sea ASCII-safe
+/* ------------------------------------------------------------------ */
+/* Catalogos del modelo                                               */
+/* ------------------------------------------------------------------ */
+
+const PAISES = ['Chile', 'Argentina'];
+const MODALIDADES = ['Único', 'Seriado'];
+const TIPOS_DESCUENTO = ['Porcentaje', 'Monto Fijo'];
+const OPCIONES_SI_NO = ['No', 'Sí'];
+const APLICA_A = [
+  'Todo el catálogo',
+  'Categoría o landing',
+  'SKUs específicos',
+  'Condición de costo',
+];
+const GRUPOS_CLIENTES = [
+  'Clientes nuevos',
+  'Clientes recurrentes',
+  'Consultoras activas',
+  'Programa fidelidad',
+];
+
+const FORM_INICIAL = {
+  // 1. Origen
+  solicitante: '',
+  pais: PAISES[0],
+  modalidad: MODALIDADES[0],
+  codigo: '',
+  // 2. Beneficio
+  tipoDescuento: TIPOS_DESCUENTO[0],
+  valor: '',
+  tieneTope: 'No',
+  topeMaximo: '',
+  tieneMinimo: 'No',
+  montoMinimo: '',
+  // 3. Alcance
+  aplicaA: APLICA_A[0],
+  targetDetalle: '',
+  categoriaExcluir: '',
+  // 4. Vigencia y clientes
+  fechaInicio: '',
+  fechaFin: '',
+  grupoExiste: 'No',
+  grupoClientes: GRUPOS_CLIENTES[0],
+  listaEmails: '',
+};
+
+/* ------------------------------------------------------------------ */
+/* Helpers de formato                                                 */
+/* ------------------------------------------------------------------ */
+
+// Quita tildes/diacriticos para que el payload de salida sea ASCII-safe
 const stripAccents = (str) =>
   String(str ?? '')
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '');
 
-// Formatea el valor para mostrarlo en pantalla ($ o %). El dato crudo
-// (número) es el que se guarda en el objeto y el que viaja en el JSON.
-const formatValorDisplay = (tipo, valor) =>
-  tipo === 'Porcentaje' ? `${valor}%` : `$${Number(valor).toLocaleString('es-CL')}`;
+const formatMonto = (monto) => `$${Number(monto).toLocaleString('es-CL')}`;
 
-const formatLimiteDisplay = (limite) => (limite === null ? 'Sin límite' : limite);
+// El dato se guarda crudo (numero). Los simbolos son solo de presentacion.
+const formatValorDisplay = (tipoDescuento, valor) =>
+  tipoDescuento === 'Porcentaje' ? `${valor}%` : formatMonto(valor);
 
-// Objeto listo para exportar/enviar a la API: sin símbolos ($, %) y sin tildes
-const toApiCoupon = (c) => ({
-  id: c.id,
-  codigo: stripAccents(c.codigo),
-  tipo: stripAccents(c.tipo),
-  valor: c.valor,
-  limite: c.limite,
-  estado: stripAccents(c.estado),
-});
+const formatTopeDisplay = (topeMaximo) =>
+  topeMaximo === null ? 'Sin tope' : formatMonto(topeMaximo);
+
+// Payload para la API: numeros sin simbolos y textos sin tildes
+const limpiarValor = (valor) => {
+  if (typeof valor === 'string') return stripAccents(valor);
+  if (Array.isArray(valor)) return valor.map(limpiarValor);
+  return valor;
+};
+
+const toApiCoupon = (cupon) =>
+  Object.fromEntries(
+    Object.entries(cupon).map(([clave, valor]) => [clave, limpiarValor(valor)]),
+  );
 
 const nextCouponId = (count) => `CUP-${String(count + 1).padStart(3, '0')}`;
+
+const parseEmails = (texto) =>
+  String(texto || '')
+    .split(/[\s,;]+/)
+    .map((email) => email.trim())
+    .filter(Boolean);
+
+/* ------------------------------------------------------------------ */
+/* Datos de prueba (ficticios)                                        */
+/* ------------------------------------------------------------------ */
 
 const MOCK_COUPONS = [
   {
     id: 'CUP-001',
+    solicitante: 'Camila Duarte',
+    pais: 'Chile',
+    modalidad: 'Seriado',
     codigo: 'VERANO2026',
-    tipo: 'Porcentaje',
+    tipoDescuento: 'Porcentaje',
     valor: 20,
-    limite: 500,
+    tieneTope: true,
+    topeMaximo: 15000,
+    tieneMinimo: true,
+    montoMinimo: 30000,
+    aplicaA: 'Categoría o landing',
+    targetDetalle: 'Landing Verano',
+    categoriaExcluir: 'Set de regalo',
+    fechaInicio: '2026-01-05',
+    fechaFin: '2026-02-28',
+    grupoExiste: true,
+    grupoClientes: 'Clientes recurrentes',
+    listaEmails: [],
     estado: 'Activo',
   },
   {
     id: 'CUP-002',
+    solicitante: 'Rodrigo Nuñez',
+    pais: 'Argentina',
+    modalidad: 'Único',
     codigo: 'BIENVENIDA10',
-    tipo: 'Monto Fijo',
+    tipoDescuento: 'Monto Fijo',
     valor: 10000,
-    limite: 100,
+    tieneTope: false,
+    topeMaximo: null,
+    tieneMinimo: false,
+    montoMinimo: null,
+    aplicaA: 'Todo el catálogo',
+    targetDetalle: null,
+    categoriaExcluir: null,
+    fechaInicio: '2026-03-01',
+    fechaFin: '2026-03-31',
+    grupoExiste: false,
+    grupoClientes: null,
+    listaEmails: ['prueba.uno@ejemplo.com', 'prueba.dos@ejemplo.com'],
     estado: 'Activo',
   },
 ];
 
+/* ------------------------------------------------------------------ */
+/* Subcomponentes de formulario                                       */
+/* ------------------------------------------------------------------ */
+
+const INPUT_CLASS =
+  'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500';
+
+function Seccion({ numero, titulo, children }) {
+  return (
+    <fieldset className="space-y-3 rounded-xl border border-slate-200 p-4">
+      <legend className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600 text-[10px] text-white">
+          {numero}
+        </span>
+        {titulo}
+      </legend>
+      {children}
+    </fieldset>
+  );
+}
+
+function Campo({ label, children }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-medium text-slate-500">
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function SelectCampo({ label, value, onChange, options }) {
+  return (
+    <Campo label={label}>
+      <select value={value} onChange={onChange} className={INPUT_CLASS}>
+        {options.map((opcion) => (
+          <option key={opcion}>{opcion}</option>
+        ))}
+      </select>
+    </Campo>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Componente principal                                               */
+/* ------------------------------------------------------------------ */
+
 export default function PromotionsManager() {
   const [mode, setMode] = useState('individual');
   const [coupons, setCoupons] = useState(MOCK_COUPONS);
+  const [form, setForm] = useState(FORM_INICIAL);
+  const [formError, setFormError] = useState(null);
+  const [uploadResult, setUploadResult] = useState(null);
   const [jsonOpen, setJsonOpen] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState(null);
 
-  const [form, setForm] = useState({
-    codigo: '',
-    tipo: 'Porcentaje',
-    valor: '',
-    limite: '',
-  });
+  const setCampo = (campo) => (e) =>
+    setForm((prev) => ({ ...prev, [campo]: e.target.value }));
 
-  // Carga Individual Manual
+  const mostrarTope = form.tieneTope === 'Sí';
+  const mostrarMinimo = form.tieneMinimo === 'Sí';
+  const mostrarTarget = form.aplicaA !== 'Todo el catálogo';
+  const usaGrupoExistente = form.grupoExiste === 'Sí';
+
+  /* ---------------- Carga individual ---------------- */
+
   function handleIndividualSubmit(e) {
     e.preventDefault();
-    if (!form.codigo || !form.valor) return;
-    const newCoupon = {
+    setFormError(null);
+
+    const codigo = form.codigo.trim().toUpperCase();
+    if (coupons.some((c) => c.codigo.toUpperCase() === codigo)) {
+      setFormError(`El código ${codigo} ya está registrado.`);
+      return;
+    }
+    if (form.fechaFin && form.fechaInicio && form.fechaFin < form.fechaInicio) {
+      setFormError('La fecha de fin no puede ser anterior a la de inicio.');
+      return;
+    }
+
+    const nuevoCupon = {
       id: nextCouponId(coupons.length),
-      codigo: form.codigo.toUpperCase(),
-      tipo: form.tipo,
+      solicitante: form.solicitante.trim(),
+      pais: form.pais,
+      modalidad: form.modalidad,
+      codigo,
+      tipoDescuento: form.tipoDescuento,
       valor: Number(form.valor),
-      limite: form.limite === '' ? null : Number(form.limite),
+      tieneTope: mostrarTope,
+      topeMaximo:
+        mostrarTope && form.topeMaximo ? Number(form.topeMaximo) : null,
+      tieneMinimo: mostrarMinimo,
+      montoMinimo:
+        mostrarMinimo && form.montoMinimo ? Number(form.montoMinimo) : null,
+      aplicaA: form.aplicaA,
+      targetDetalle: mostrarTarget ? form.targetDetalle.trim() : null,
+      categoriaExcluir: form.categoriaExcluir.trim() || null,
+      fechaInicio: form.fechaInicio,
+      fechaFin: form.fechaFin,
+      grupoExiste: usaGrupoExistente,
+      grupoClientes: usaGrupoExistente ? form.grupoClientes : null,
+      listaEmails: usaGrupoExistente ? [] : parseEmails(form.listaEmails),
       estado: 'Activo',
     };
-    setCoupons([newCoupon, ...coupons]);
-    setForm({ codigo: '', tipo: 'Porcentaje', valor: '', limite: '' });
+
+    setCoupons((prev) => [nuevoCupon, ...prev]);
+    setForm(FORM_INICIAL);
   }
 
-  // Lector de Excel/CSV con búsqueda flexible de cabeceras (tildes/mayúsculas)
+  /* ---------------- Carga colectiva ---------------- */
+
   function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -91,88 +265,122 @@ export default function PromotionsManager() {
     const reader = new FileReader();
 
     reader.onerror = () => {
-      setUploadMessage('No se pudo leer el archivo. Intenta nuevamente.');
+      setUploadResult({
+        ok: false,
+        texto: 'No se pudo leer el archivo. Intenta nuevamente.',
+        detalles: [],
+      });
     };
 
     reader.onload = (evt) => {
       try {
-        const wb = XLSX.read(evt.target.result, { type: 'array' });
+        // cellDates deja las fechas como Date en vez de seriales de Excel
+        const wb = XLSX.read(evt.target.result, {
+          type: 'array',
+          cellDates: true,
+        });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(ws, { defval: null });
 
         if (!data || data.length === 0) {
-          setUploadMessage('El archivo está vacío o no tiene filas válidas.');
+          setUploadResult({
+            ok: false,
+            texto: 'El archivo está vacío o no tiene filas válidas.',
+            detalles: [],
+          });
           return;
         }
 
-        // Normaliza para comparar: sin tildes, sin espacios, minúsculas
+        // Normaliza cabeceras: sin tildes, sin espacios, minusculas
         const cleanStr = (str) =>
           String(str ?? '')
             .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[̀-ͯ]/g, '')
             .toLowerCase()
             .replace(/[^a-z0-9]/g, '');
 
-        // Busca el valor de la primera cabecera candidata que coincida.
-        // Admite coincidencia parcial ("Código Cupón" matchea "codigo").
-        const getVal = (row, candidateKeys) => {
+        const parseNumero = (raw) =>
+          parseFloat(String(raw).replace(/[^0-9.-]/g, ''));
+
+        // Devuelve la clave de la primera cabecera candidata con contenido util.
+        // `predicado` permite exigir, por ejemplo, que la celda sea numerica.
+        const buscarClave = (row, candidatas, predicado) => {
           const keys = Object.keys(row);
-          for (const cand of candidateKeys) {
-            const candClean = cleanStr(cand);
-            const foundKey = keys.find((k) => {
-              const keyClean = cleanStr(k);
-              return (
-                keyClean === candClean ||
-                keyClean.includes(candClean) ||
-                candClean.includes(keyClean)
-              );
-            });
-            const val = foundKey ? row[foundKey] : null;
-            if (val !== null && val !== undefined && String(val).trim() !== '') {
-              return String(val).trim();
-            }
-          }
-          return null;
-        };
-
-        const esMontoFijo = (tipoStr) =>
-          cleanStr(tipoStr).includes('monto') || cleanStr(tipoStr).includes('fijo');
-
-        // Placeholders que NO son un código real de cupón
-        const PLACEHOLDERS = ['na', 'n', 'sincodigo', 'sincupon', 'ninguno', 'null'];
-        const esCodigoValido = (codigo) => {
-          const limpio = cleanStr(codigo);
-          return limpio.length > 0 && !PLACEHOLDERS.includes(limpio);
-        };
-
-        // Igual que getVal, pero solo acepta celdas con contenido numérico.
-        // Evita confundir la columna "Tipo Descuento" (texto) con el valor.
-        const getNumVal = (row, candidateKeys) => {
-          const keys = Object.keys(row);
-          for (const cand of candidateKeys) {
-            const candClean = cleanStr(cand);
-            for (const k of keys) {
-              const keyClean = cleanStr(k);
+          for (const candidata of candidatas) {
+            const candClean = cleanStr(candidata);
+            for (const key of keys) {
+              const keyClean = cleanStr(key);
               const matchea =
                 keyClean === candClean ||
                 keyClean.includes(candClean) ||
                 candClean.includes(keyClean);
               if (!matchea) continue;
 
-              const raw = row[k];
-              if (raw === null || raw === undefined || String(raw).trim() === '') continue;
+              const raw = row[key];
+              if (raw === null || raw === undefined) continue;
+              if (!(raw instanceof Date) && String(raw).trim() === '') continue;
+              if (predicado && !predicado(raw)) continue;
 
-              const num = parseFloat(String(raw).replace(/[^0-9.-]/g, ''));
-              if (!isNaN(num)) return num;
+              return key;
             }
           }
           return null;
         };
 
-        // Valor numérico crudo (sin $ ni %). El formato visual lo pone la tabla.
-        const parseValor = (row, tipoStr) => {
-          const montoFijo = esMontoFijo(tipoStr);
-          let num = getNumVal(row, [
+        const getTexto = (row, candidatas) => {
+          const key = buscarClave(row, candidatas);
+          return key ? String(row[key]).trim() : null;
+        };
+
+        // Solo celdas numericas: evita confundir "Tipo Descuento" (texto)
+        // con la columna del valor del descuento.
+        const getNumero = (row, candidatas) => {
+          const key = buscarClave(
+            row,
+            candidatas,
+            (raw) => !isNaN(parseNumero(raw)),
+          );
+          return key ? parseNumero(row[key]) : null;
+        };
+
+        // SheetJS alinea las fechas a medianoche UTC, pero la conversion del
+        // serial de Excel puede desviarse unos segundos (ej: 23:59:59 del dia
+        // anterior). Se redondea al dia mas cercano antes de formatear.
+        const MS_POR_DIA = 86400000;
+        const getFecha = (row, candidatas) => {
+          const key = buscarClave(row, candidatas);
+          if (!key) return '';
+
+          const valor = row[key];
+          const fecha = valor instanceof Date ? valor : new Date(valor);
+          if (isNaN(fecha.getTime())) return '';
+
+          const redondeada = new Date(
+            Math.round(fecha.getTime() / MS_POR_DIA) * MS_POR_DIA,
+          );
+          return redondeada.toISOString().slice(0, 10);
+        };
+
+        const esMontoFijo = (tipo) =>
+          cleanStr(tipo).includes('monto') || cleanStr(tipo).includes('fijo');
+
+        // Textos que no representan un codigo real de cupon
+        const PLACEHOLDERS = [
+          'na',
+          'n',
+          'sincodigo',
+          'sincupon',
+          'ninguno',
+          'null',
+        ];
+        const esCodigoValido = (codigo) => {
+          const limpio = cleanStr(codigo);
+          return limpio.length > 0 && !PLACEHOLDERS.includes(limpio);
+        };
+
+        const parseValor = (row, tipo) => {
+          const montoFijo = esMontoFijo(tipo);
+          let numero = getNumero(row, [
             'porcentajedescuento',
             'valor',
             'descuento',
@@ -180,103 +388,166 @@ export default function PromotionsManager() {
             'montofijo',
           ]);
 
-          // Monto Fijo sin valor propio: el tope ES el monto del descuento
-          if (num === null && montoFijo) {
-            num = getNumVal(row, ['topemaximo', 'tope', 'monto']);
+          // Monto fijo sin columna propia: el tope ES el monto del descuento
+          if (numero === null && montoFijo) {
+            numero = getNumero(row, ['topemaximo', 'tope', 'monto']);
           }
-          if (num === null) return 0;
+          if (numero === null) return 0;
 
-          // Excel guarda los porcentajes como fracción: 0.15 -> 15
-          if (!montoFijo && num > 0 && num <= 1) return Math.round(num * 100);
-          return num;
+          // Excel guarda los porcentajes como fraccion: 0.15 -> 15
+          if (!montoFijo && numero > 0 && numero <= 1) {
+            return Math.round(numero * 100);
+          }
+          return numero;
         };
 
         // Se dedupica dentro del updater para no leer un `coupons` desactualizado
         setCoupons((prev) => {
           const existentes = new Set(prev.map((c) => c.codigo.toUpperCase()));
-          const nuevosCupones = [];
+          const nuevos = [];
+          const rechazos = [];
 
-          data.forEach((row) => {
-            // 1. Las promociones automáticas no llevan cupón: se ignoran
-            if (cleanStr(getVal(row, ['mecanica'])) === 'promocion') return;
+          data.forEach((row, indice) => {
+            // +2: la fila 1 del Excel es la cabecera y sheet_to_json es 0-based
+            const fila = indice + 2;
 
-            // 2. Solo filas con un código de cupón real
-            const codigo = getVal(row, ['codigocupon', 'codigo', 'cupon', 'code']);
+            // 1. Las promociones automaticas no llevan cupon: se omiten
+            if (cleanStr(getTexto(row, ['mecanica'])) === 'promocion') return;
+
+            // 2. Solo filas con un codigo de cupon real
+            const codigo = getTexto(row, [
+              'codigocupon',
+              'codigo',
+              'cupon',
+              'code',
+            ]);
             if (!codigo || !esCodigoValido(codigo)) return;
 
             // 3. Sin duplicados (ni contra la tabla ni dentro del mismo archivo)
-            const codigoClean = codigo.toUpperCase();
-            if (existentes.has(codigoClean)) return;
-            existentes.add(codigoClean);
+            const codigoUpper = codigo.toUpperCase();
+            if (existentes.has(codigoUpper)) return;
 
-            const tipo = getVal(row, ['tipodescuento', 'tipo', 'mecanica']) || 'Porcentaje';
+            // 4. Solicitante y pais son obligatorios: si faltan se rechaza la
+            // fila en vez de asumir un valor por defecto que podria ser erroneo
+            const solicitante = getTexto(row, [
+              'solicitante',
+              'responsable',
+              'area',
+            ]);
+            if (!solicitante) {
+              rechazos.push(`Fila ${fila} (${codigoUpper}): falta el solicitante.`);
+              return;
+            }
 
-            nuevosCupones.push({
-              id: nextCouponId(prev.length + nuevosCupones.length),
-              codigo: codigoClean,
-              tipo: esMontoFijo(tipo) ? 'Monto Fijo' : 'Porcentaje',
+            const paisArchivo = getTexto(row, ['pais', 'country']);
+            const pais = PAISES.find(
+              (p) => cleanStr(p) === cleanStr(paisArchivo),
+            );
+            if (!pais) {
+              rechazos.push(
+                paisArchivo
+                  ? `Fila ${fila} (${codigoUpper}): país "${paisArchivo}" no reconocido.`
+                  : `Fila ${fila} (${codigoUpper}): falta el país.`,
+              );
+              return;
+            }
+
+            existentes.add(codigoUpper);
+
+            const tipo =
+              getTexto(row, ['tipodescuento', 'tipo', 'mecanica']) ||
+              'Porcentaje';
+            const topeMaximo = getNumero(row, ['topemaximo', 'tope']);
+            const montoMinimo = getNumero(row, [
+              'montominimo',
+              'minimo',
+              'compraminima',
+            ]);
+            const modalidadArchivo = getTexto(row, ['modalidad']);
+
+            nuevos.push({
+              id: nextCouponId(prev.length + nuevos.length),
+              solicitante,
+              pais,
+              modalidad:
+                cleanStr(modalidadArchivo) === 'seriado' ? 'Seriado' : 'Único',
+              codigo: codigoUpper,
+              tipoDescuento: esMontoFijo(tipo) ? 'Monto Fijo' : 'Porcentaje',
               valor: parseValor(row, tipo),
-              limite: getNumVal(row, ['topemaximo', 'tope', 'limite', 'limiteuso']),
+              tieneTope: topeMaximo !== null,
+              topeMaximo,
+              tieneMinimo: montoMinimo !== null,
+              montoMinimo,
+              aplicaA: getTexto(row, ['aplicaa', 'alcance']) || APLICA_A[0],
+              targetDetalle: getTexto(row, [
+                'targetdetalle',
+                'target',
+                'categoria',
+                'sku',
+              ]),
+              categoriaExcluir: getTexto(row, ['categoriaexcluir', 'excluir']),
+              fechaInicio: getFecha(row, ['fechainicio', 'inicio', 'desde']),
+              fechaFin: getFecha(row, ['fechafin', 'fin', 'hasta']),
+              grupoExiste: false,
+              grupoClientes: null,
+              listaEmails: [],
               estado: 'Activo',
             });
           });
 
-          if (nuevosCupones.length === 0) {
-            setUploadMessage(
-              'No se agregaron cupones nuevos (promociones sin código y duplicados fueron ignorados).',
-            );
-            return prev;
-          }
+          setUploadResult({
+            ok: nuevos.length > 0 && rechazos.length === 0,
+            texto:
+              nuevos.length > 0
+                ? `Se importaron ${nuevos.length} cupones.`
+                : 'No se importó ningún cupón.',
+            detalles: rechazos,
+          });
 
-          setUploadMessage(
-            `¡Éxito! Se importaron ${nuevosCupones.length} cupones correctamente.`,
-          );
-          return [...nuevosCupones, ...prev];
+          return nuevos.length > 0 ? [...nuevos, ...prev] : prev;
         });
       } catch (err) {
         console.error('Error al procesar archivo:', err);
-        setUploadMessage(
-          'Error al leer el archivo. Asegúrate de que sea .xlsx, .xls o .csv',
-        );
+        setUploadResult({
+          ok: false,
+          texto: 'Error al leer el archivo. Asegúrate de que sea .xlsx, .xls o .csv',
+          detalles: [],
+        });
       }
     };
 
     reader.readAsArrayBuffer(file);
 
-    // Permite volver a cargar el mismo archivo si el usuario lo reintenta
+    // Permite volver a cargar el mismo archivo si el usuario reintenta
     e.target.value = '';
   }
+
+  /* ---------------- Render ---------------- */
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-slate-900">
-          Módulo de Carga de Cupones
+          Gestor de Cupones
         </h1>
         <p className="text-sm text-slate-500">
-          Gestión de cupones de descuento individuales y masivos.
+          Carga individual y masiva de cupones de descuento.
         </p>
       </div>
 
-      <div className="flex gap-2 border-b border-slate-200 pb-3">
+      <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
         <button
-          onClick={() => {
-            setMode('individual');
-            setUploadMessage(null);
-          }}
+          onClick={() => setMode('individual')}
           className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
             mode === 'individual'
               ? 'bg-indigo-600 text-white'
               : 'bg-white text-slate-600 hover:bg-slate-50'
           }`}
         >
-          <PlusCircle size={16} /> Carga Individual
+          <PlusCircle size={16} /> Carga Individual (18 Campos)
         </button>
         <button
-          onClick={() => {
-            setMode('colectivo');
-            setUploadMessage(null);
-          }}
+          onClick={() => setMode('colectivo')}
           className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
             mode === 'colectivo'
               ? 'bg-indigo-600 text-white'
@@ -291,75 +562,200 @@ export default function PromotionsManager() {
         <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200 lg:col-span-1">
           {mode === 'individual' ? (
             <form onSubmit={handleIndividualSubmit} className="space-y-4">
-              <p className="text-sm font-semibold text-slate-700">
-                Nuevo Cupón Individual
-              </p>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Código del Cupón
-                </label>
-                <input
-                  required
-                  value={form.codigo}
-                  onChange={(e) => setForm({ ...form, codigo: e.target.value })}
-                  placeholder="Ej: BDAY2026"
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              <Seccion numero="1" titulo="Origen">
+                <Campo label="Solicitante">
+                  <input
+                    required
+                    value={form.solicitante}
+                    onChange={setCampo('solicitante')}
+                    placeholder="Ej: Camila Duarte"
+                    className={INPUT_CLASS}
+                  />
+                </Campo>
+                <SelectCampo
+                  label="País"
+                  value={form.pais}
+                  onChange={setCampo('pais')}
+                  options={PAISES}
                 />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Tipo de Descuento
-                </label>
-                <select
-                  value={form.tipo}
-                  onChange={(e) => setForm({ ...form, tipo: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option>Porcentaje</option>
-                  <option>Monto Fijo</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Valor
-                </label>
-                <input
-                  required
-                  type="number"
-                  value={form.valor}
-                  onChange={(e) => setForm({ ...form, valor: e.target.value })}
-                  placeholder={
-                    form.tipo === 'Porcentaje' ? 'Ej: 15 (%)' : 'Ej: 5000 ($)'
+                <SelectCampo
+                  label="Modalidad"
+                  value={form.modalidad}
+                  onChange={setCampo('modalidad')}
+                  options={MODALIDADES}
+                />
+                <Campo label="Código del cupón">
+                  <input
+                    required
+                    value={form.codigo}
+                    onChange={setCampo('codigo')}
+                    placeholder="Ej: BDAY2026"
+                    className={`${INPUT_CLASS} font-mono uppercase`}
+                  />
+                </Campo>
+              </Seccion>
+
+              <Seccion numero="2" titulo="Beneficio">
+                <SelectCampo
+                  label="Tipo de descuento"
+                  value={form.tipoDescuento}
+                  onChange={setCampo('tipoDescuento')}
+                  options={TIPOS_DESCUENTO}
+                />
+                <Campo
+                  label={
+                    form.tipoDescuento === 'Porcentaje'
+                      ? 'Valor (%)'
+                      : 'Valor ($)'
                   }
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    value={form.valor}
+                    onChange={setCampo('valor')}
+                    placeholder={
+                      form.tipoDescuento === 'Porcentaje' ? 'Ej: 15' : 'Ej: 5000'
+                    }
+                    className={INPUT_CLASS}
+                  />
+                </Campo>
+                <SelectCampo
+                  label="¿Tiene tope máximo?"
+                  value={form.tieneTope}
+                  onChange={setCampo('tieneTope')}
+                  options={OPCIONES_SI_NO}
                 />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-slate-500">
-                  Límite de Uso
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={form.limite}
-                  onChange={(e) => setForm({ ...form, limite: e.target.value })}
-                  placeholder="Ej: 500 (vacío = sin límite)"
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                {mostrarTope && (
+                  <Campo label="Tope máximo ($)">
+                    <input
+                      required
+                      type="number"
+                      min="0"
+                      value={form.topeMaximo}
+                      onChange={setCampo('topeMaximo')}
+                      placeholder="Ej: 15000"
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                )}
+                <SelectCampo
+                  label="¿Tiene monto mínimo de compra?"
+                  value={form.tieneMinimo}
+                  onChange={setCampo('tieneMinimo')}
+                  options={OPCIONES_SI_NO}
                 />
-              </div>
+                {mostrarMinimo && (
+                  <Campo label="Monto mínimo ($)">
+                    <input
+                      required
+                      type="number"
+                      min="0"
+                      value={form.montoMinimo}
+                      onChange={setCampo('montoMinimo')}
+                      placeholder="Ej: 30000"
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                )}
+              </Seccion>
+
+              <Seccion numero="3" titulo="Alcance">
+                <SelectCampo
+                  label="Aplica a"
+                  value={form.aplicaA}
+                  onChange={setCampo('aplicaA')}
+                  options={APLICA_A}
+                />
+                {mostrarTarget && (
+                  <Campo label={`Detalle de ${form.aplicaA.toLowerCase()}`}>
+                    <input
+                      required
+                      value={form.targetDetalle}
+                      onChange={setCampo('targetDetalle')}
+                      placeholder="Ej: Landing Verano / SKU-1234"
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                )}
+                <Campo label="Categoría a excluir (opcional)">
+                  <input
+                    value={form.categoriaExcluir}
+                    onChange={setCampo('categoriaExcluir')}
+                    placeholder="Ej: Set de regalo"
+                    className={INPUT_CLASS}
+                  />
+                </Campo>
+              </Seccion>
+
+              <Seccion numero="4" titulo="Vigencia y clientes">
+                <div className="grid grid-cols-2 gap-3">
+                  <Campo label="Fecha inicio">
+                    <input
+                      required
+                      type="date"
+                      value={form.fechaInicio}
+                      onChange={setCampo('fechaInicio')}
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                  <Campo label="Fecha fin">
+                    <input
+                      required
+                      type="date"
+                      value={form.fechaFin}
+                      onChange={setCampo('fechaFin')}
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                </div>
+                <SelectCampo
+                  label="¿El grupo de clientes ya existe?"
+                  value={form.grupoExiste}
+                  onChange={setCampo('grupoExiste')}
+                  options={OPCIONES_SI_NO}
+                />
+                {usaGrupoExistente ? (
+                  <SelectCampo
+                    label="Grupo de clientes"
+                    value={form.grupoClientes}
+                    onChange={setCampo('grupoClientes')}
+                    options={GRUPOS_CLIENTES}
+                  />
+                ) : (
+                  <Campo label="Lista de correos">
+                    <textarea
+                      rows={3}
+                      value={form.listaEmails}
+                      onChange={setCampo('listaEmails')}
+                      placeholder="Separa los correos por coma o salto de línea"
+                      className={INPUT_CLASS}
+                    />
+                  </Campo>
+                )}
+              </Seccion>
+
+              {formError && (
+                <div className="flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-xs font-medium text-rose-700">
+                  <AlertCircle size={16} className="mt-px shrink-0" />
+                  {formError}
+                </div>
+              )}
+
               <button
                 type="submit"
                 className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700"
               >
-                Guardar Cupón
+                Guardar cupón
               </button>
             </form>
           ) : (
             <div className="space-y-4">
               <p className="text-sm font-semibold text-slate-700">
-                Carga Masiva de Archivo
+                Carga masiva de archivo
               </p>
-              <label className="flex flex-col items-center justify-center cursor-pointer rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:bg-slate-50">
+              <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:bg-slate-50">
                 <FileSpreadsheet className="mb-2 text-indigo-600" size={32} />
                 <p className="text-xs font-medium text-slate-700">
                   Selecciona tu Excel (.xlsx) o CSV
@@ -374,10 +770,40 @@ export default function PromotionsManager() {
                   className="hidden"
                 />
               </label>
-              {uploadMessage && (
-                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 p-3 text-xs font-medium text-emerald-700">
-                  <CheckCircle2 size={16} />
-                  {uploadMessage}
+              <p className="rounded-lg bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-500">
+                Se omiten las promociones automáticas sin código y los cupones
+                ya registrados. Cada fila debe indicar su solicitante y su país
+                (Chile o Argentina); si falta alguno, la fila se rechaza.
+              </p>
+              {uploadResult && (
+                <div
+                  className={`rounded-lg p-3 text-xs ${
+                    uploadResult.ok
+                      ? 'bg-emerald-50 text-emerald-700'
+                      : 'bg-rose-50 text-rose-700'
+                  }`}
+                >
+                  <p className="flex items-start gap-2 font-medium">
+                    {uploadResult.ok ? (
+                      <CheckCircle2 size={16} className="mt-px shrink-0" />
+                    ) : (
+                      <AlertCircle size={16} className="mt-px shrink-0" />
+                    )}
+                    {uploadResult.texto}
+                  </p>
+                  {uploadResult.detalles.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-8">
+                      {uploadResult.detalles.slice(0, 8).map((detalle) => (
+                        <li key={detalle}>{detalle}</li>
+                      ))}
+                      {uploadResult.detalles.length > 8 && (
+                        <li>
+                          y {uploadResult.detalles.length - 8} fila(s) más con
+                          problemas.
+                        </li>
+                      )}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>
@@ -387,18 +813,19 @@ export default function PromotionsManager() {
         <div className="space-y-4 lg:col-span-2">
           <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
             <p className="text-sm font-semibold text-slate-700">
-              Cupones Registrados ({coupons.length})
+              Cupones registrados ({coupons.length})
             </p>
           </div>
 
-          <div className="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
+          <div className="overflow-x-auto rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
             <table className="w-full text-left text-sm">
               <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500 uppercase">
+                <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium uppercase text-slate-500">
                   <th className="px-4 py-3">Código</th>
+                  <th className="px-4 py-3">Solicitante / País</th>
                   <th className="px-4 py-3">Tipo</th>
                   <th className="px-4 py-3">Valor</th>
-                  <th className="px-4 py-3">Límite Uso</th>
+                  <th className="px-4 py-3">Tope máximo</th>
                   <th className="px-4 py-3">Estado</th>
                 </tr>
               </thead>
@@ -408,12 +835,18 @@ export default function PromotionsManager() {
                     <td className="px-4 py-3 font-mono font-semibold text-indigo-600">
                       {c.codigo}
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{c.tipo}</td>
-                    <td className="px-4 py-3 font-medium text-slate-900">
-                      {formatValorDisplay(c.tipo, c.valor)}
+                    <td className="px-4 py-3">
+                      <p className="text-slate-900">{c.solicitante}</p>
+                      <p className="text-xs text-slate-400">{c.pais}</p>
                     </td>
                     <td className="px-4 py-3 text-slate-600">
-                      {formatLimiteDisplay(c.limite)}
+                      {c.tipoDescuento}
+                    </td>
+                    <td className="px-4 py-3 font-medium text-slate-900">
+                      {formatValorDisplay(c.tipoDescuento, c.valor)}
+                    </td>
+                    <td className="px-4 py-3 text-slate-600">
+                      {formatTopeDisplay(c.topeMaximo)}
                     </td>
                     <td className="px-4 py-3">
                       <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
@@ -432,8 +865,8 @@ export default function PromotionsManager() {
               className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-slate-700"
             >
               <span className="flex items-center gap-2">
-                <Code2 size={16} className="text-indigo-600" /> Visor JSON
-                resultante para API
+                <Code2 size={16} className="text-indigo-600" />
+                Visor JSON de salida
               </span>
               {jsonOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
             </button>
