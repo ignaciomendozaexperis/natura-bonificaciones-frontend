@@ -10,12 +10,37 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
+// Quita tildes/diacríticos para que el JSON de salida sea ASCII-safe
+const stripAccents = (str) =>
+  String(str ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+
+// Formatea el valor para mostrarlo en pantalla ($ o %). El dato crudo
+// (número) es el que se guarda en el objeto y el que viaja en el JSON.
+const formatValorDisplay = (tipo, valor) =>
+  tipo === 'Porcentaje' ? `${valor}%` : `$${Number(valor).toLocaleString('es-CL')}`;
+
+const formatLimiteDisplay = (limite) => (limite === null ? 'Sin límite' : limite);
+
+// Objeto listo para exportar/enviar a la API: sin símbolos ($, %) y sin tildes
+const toApiCoupon = (c) => ({
+  id: c.id,
+  codigo: stripAccents(c.codigo),
+  tipo: stripAccents(c.tipo),
+  valor: c.valor,
+  limite: c.limite,
+  estado: stripAccents(c.estado),
+});
+
+const nextCouponId = (count) => `CUP-${String(count + 1).padStart(3, '0')}`;
+
 const MOCK_COUPONS = [
   {
     id: 'CUP-001',
     codigo: 'VERANO2026',
     tipo: 'Porcentaje',
-    valor: '20%',
+    valor: 20,
     limite: 500,
     estado: 'Activo',
   },
@@ -23,7 +48,7 @@ const MOCK_COUPONS = [
     id: 'CUP-002',
     codigo: 'BIENVENIDA10',
     tipo: 'Monto Fijo',
-    valor: '$10.000',
+    valor: 10000,
     limite: 100,
     estado: 'Activo',
   },
@@ -45,47 +70,51 @@ export default function PromotionsManager() {
   // Carga Individual Manual
   function handleIndividualSubmit(e) {
     e.preventDefault();
-    if (!form.codigo) return;
+    if (!form.codigo || !form.valor) return;
     const newCoupon = {
-      id: `CUP-00${coupons.length + 1}`,
+      id: nextCouponId(coupons.length),
       codigo: form.codigo.toUpperCase(),
       tipo: form.tipo,
-      valor: form.tipo === 'Porcentaje' ? `${form.valor}%` : `$${form.valor}`,
-      limite: form.limite || 'Sin límite',
+      valor: Number(form.valor),
+      limite: form.limite === '' ? null : Number(form.limite),
       estado: 'Activo',
     };
     setCoupons([newCoupon, ...coupons]);
     setForm({ codigo: '', tipo: 'Porcentaje', valor: '', limite: '' });
   }
 
-  // Lector de Archivos con Búsqueda Inteligente de Cabeceras
+  // Lector de Excel/CSV con búsqueda flexible de cabeceras (tildes/mayúsculas)
   function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
 
     const reader = new FileReader();
+
+    reader.onerror = () => {
+      setUploadMessage('No se pudo leer el archivo. Intenta nuevamente.');
+    };
+
     reader.onload = (evt) => {
       try {
-        const bstr = evt.target.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
-        const wsname = wb.SheetNames[0];
-        const ws = wb.Sheets[wsname];
-        const data = XLSX.utils.sheet_to_json(ws);
+        const wb = XLSX.read(evt.target.result, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { defval: null });
 
         if (!data || data.length === 0) {
           setUploadMessage('El archivo está vacío o no tiene filas válidas.');
           return;
         }
 
+        // Normaliza para comparar: sin tildes, sin espacios, minúsculas
         const cleanStr = (str) =>
-          String(str || '')
+          String(str ?? '')
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
             .toLowerCase()
-            .replace(/[^a-z0-9]/g, '')
-            .trim();
+            .replace(/[^a-z0-9]/g, '');
 
-        // Búsqueda flexible que admite coincidencia parcial en cabeceras largas
+        // Busca el valor de la primera cabecera candidata que coincida.
+        // Admite coincidencia parcial ("Código Cupón" matchea "codigo").
         const getVal = (row, candidateKeys) => {
           const keys = Object.keys(row);
           for (const cand of candidateKeys) {
@@ -98,114 +127,124 @@ export default function PromotionsManager() {
                 candClean.includes(keyClean)
               );
             });
-            if (
-              foundKey &&
-              row[foundKey] !== undefined &&
-              row[foundKey] !== null &&
-              String(row[foundKey]).trim() !== ''
-            ) {
-              return String(row[foundKey]).trim();
+            const val = foundKey ? row[foundKey] : null;
+            if (val !== null && val !== undefined && String(val).trim() !== '') {
+              return String(val).trim();
             }
           }
           return null;
         };
 
-        const formatValor = (rawValor, tipoStr, row) => {
-          let val = rawValor;
-          const isMontoFijo =
-            cleanStr(tipoStr).includes('monto') ||
-            cleanStr(tipoStr).includes('fijo');
+        const esMontoFijo = (tipoStr) =>
+          cleanStr(tipoStr).includes('monto') || cleanStr(tipoStr).includes('fijo');
 
-          // Si es Monto Fijo y no vino valor de descuento, busca en el campo de Tope Máximo
-          if (!val && isMontoFijo) {
-            val = getVal(row, ['topemaximo', 'tope', 'monto']);
-          }
-
-          if (!val) return isMontoFijo ? '$0' : '0%';
-
-          const num = parseFloat(String(val).replace(/[^0-9.-]/g, ''));
-
-          if (isMontoFijo) {
-            if (!isNaN(num)) return `$${num.toLocaleString('es-CL')}`;
-            return String(val).startsWith('$') ? val : `$${val}`;
-          } else {
-            if (!isNaN(num)) {
-              if (num > 0 && num <= 1) return `${Math.round(num * 100)}%`;
-              return `${num}%`;
-            }
-            return String(val).includes('%') ? val : `${val}%`;
-          }
+        // Placeholders que NO son un código real de cupón
+        const PLACEHOLDERS = ['na', 'n', 'sincodigo', 'sincupon', 'ninguno', 'null'];
+        const esCodigoValido = (codigo) => {
+          const limpio = cleanStr(codigo);
+          return limpio.length > 0 && !PLACEHOLDERS.includes(limpio);
         };
 
-        const nuevosCupones = [];
+        // Igual que getVal, pero solo acepta celdas con contenido numérico.
+        // Evita confundir la columna "Tipo Descuento" (texto) con el valor.
+        const getNumVal = (row, candidateKeys) => {
+          const keys = Object.keys(row);
+          for (const cand of candidateKeys) {
+            const candClean = cleanStr(cand);
+            for (const k of keys) {
+              const keyClean = cleanStr(k);
+              const matchea =
+                keyClean === candClean ||
+                keyClean.includes(candClean) ||
+                candClean.includes(keyClean);
+              if (!matchea) continue;
 
-        data.forEach((row) => {
-          // 1. Filtrar filas cuya mecánica sea "Promoción" (sin cupón)
-          const mecanica = getVal(row, ['mecanica']) || '';
-          if (cleanStr(mecanica) === 'promocion') return;
+              const raw = row[k];
+              if (raw === null || raw === undefined || String(raw).trim() === '') continue;
 
-          // 2. Extraer Código de Cupón de forma estricta
-          const codigo = getVal(row, [
-            'codigocupon',
-            'codigo',
-            'cupon',
-            'code',
+              const num = parseFloat(String(raw).replace(/[^0-9.-]/g, ''));
+              if (!isNaN(num)) return num;
+            }
+          }
+          return null;
+        };
+
+        // Valor numérico crudo (sin $ ni %). El formato visual lo pone la tabla.
+        const parseValor = (row, tipoStr) => {
+          const montoFijo = esMontoFijo(tipoStr);
+          let num = getNumVal(row, [
+            'porcentajedescuento',
+            'valor',
+            'descuento',
+            'monto',
+            'montofijo',
           ]);
-          if (!codigo) return;
 
-          const codigoClean = codigo.toUpperCase();
-          const yaEnTabla = coupons.some(
-            (c) => c.codigo.toUpperCase() === codigoClean
-          );
-          const yaEnNuevos = nuevosCupones.some(
-            (c) => c.codigo.toUpperCase() === codigoClean
-          );
+          // Monto Fijo sin valor propio: el tope ES el monto del descuento
+          if (num === null && montoFijo) {
+            num = getNumVal(row, ['topemaximo', 'tope', 'monto']);
+          }
+          if (num === null) return 0;
 
-          if (!yaEnTabla && !yaEnNuevos) {
-            const tipo =
-              getVal(row, ['tipodescuento', 'tipo', 'mecanica']) ||
-              'Porcentaje';
-            const rawValor = getVal(row, [
-              'porcentajedescuento',
-              'valor',
-              'descuento',
-              'monto',
-              'montofijo',
-            ]);
+          // Excel guarda los porcentajes como fracción: 0.15 -> 15
+          if (!montoFijo && num > 0 && num <= 1) return Math.round(num * 100);
+          return num;
+        };
+
+        // Se dedupica dentro del updater para no leer un `coupons` desactualizado
+        setCoupons((prev) => {
+          const existentes = new Set(prev.map((c) => c.codigo.toUpperCase()));
+          const nuevosCupones = [];
+
+          data.forEach((row) => {
+            // 1. Las promociones automáticas no llevan cupón: se ignoran
+            if (cleanStr(getVal(row, ['mecanica'])) === 'promocion') return;
+
+            // 2. Solo filas con un código de cupón real
+            const codigo = getVal(row, ['codigocupon', 'codigo', 'cupon', 'code']);
+            if (!codigo || !esCodigoValido(codigo)) return;
+
+            // 3. Sin duplicados (ni contra la tabla ni dentro del mismo archivo)
+            const codigoClean = codigo.toUpperCase();
+            if (existentes.has(codigoClean)) return;
+            existentes.add(codigoClean);
+
+            const tipo = getVal(row, ['tipodescuento', 'tipo', 'mecanica']) || 'Porcentaje';
 
             nuevosCupones.push({
-              id: `CUP-${coupons.length + nuevosCupones.length + 1}`,
+              id: nextCouponId(prev.length + nuevosCupones.length),
               codigo: codigoClean,
-              tipo: cleanStr(tipo).includes('monto')
-                ? 'Monto Fijo'
-                : 'Porcentaje',
-              valor: formatValor(rawValor, tipo, row),
-              limite:
-                getVal(row, ['topemaximo', 'tope', 'limite', 'limiteuso']) ||
-                'Sin límite',
+              tipo: esMontoFijo(tipo) ? 'Monto Fijo' : 'Porcentaje',
+              valor: parseValor(row, tipo),
+              limite: getNumVal(row, ['topemaximo', 'tope', 'limite', 'limiteuso']),
               estado: 'Activo',
             });
-          }
-        });
+          });
 
-        if (nuevosCupones.length === 0) {
+          if (nuevosCupones.length === 0) {
+            setUploadMessage(
+              'No se agregaron cupones nuevos (promociones sin código y duplicados fueron ignorados).',
+            );
+            return prev;
+          }
+
           setUploadMessage(
-            'No se agregaron cupones nuevos (las promociones sin código fueron ignoradas).'
+            `¡Éxito! Se importaron ${nuevosCupones.length} cupones correctamente.`,
           );
-        } else {
-          setCoupons((prev) => [...nuevosCupones, ...prev]);
-          setUploadMessage(
-            `¡Éxito! Se importaron ${nuevosCupones.length} cupones reales correctamente.`
-          );
-        }
+          return [...nuevosCupones, ...prev];
+        });
       } catch (err) {
         console.error('Error al procesar archivo:', err);
         setUploadMessage(
-          'Error al leer el archivo. Asegúrate de que sea .xlsx, .xls o .csv'
+          'Error al leer el archivo. Asegúrate de que sea .xlsx, .xls o .csv',
         );
       }
     };
-    reader.readAsBinaryString(file);
+
+    reader.readAsArrayBuffer(file);
+
+    // Permite volver a cargar el mismo archivo si el usuario lo reintenta
+    e.target.value = '';
   }
 
   return (
@@ -295,6 +334,19 @@ export default function PromotionsManager() {
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 />
               </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-500">
+                  Límite de Uso
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={form.limite}
+                  onChange={(e) => setForm({ ...form, limite: e.target.value })}
+                  placeholder="Ej: 500 (vacío = sin límite)"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
               <button
                 type="submit"
                 className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700"
@@ -358,9 +410,11 @@ export default function PromotionsManager() {
                     </td>
                     <td className="px-4 py-3 text-slate-600">{c.tipo}</td>
                     <td className="px-4 py-3 font-medium text-slate-900">
-                      {c.valor}
+                      {formatValorDisplay(c.tipo, c.valor)}
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{c.limite}</td>
+                    <td className="px-4 py-3 text-slate-600">
+                      {formatLimiteDisplay(c.limite)}
+                    </td>
                     <td className="px-4 py-3">
                       <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
                         {c.estado}
@@ -385,7 +439,7 @@ export default function PromotionsManager() {
             </button>
             {jsonOpen && (
               <pre className="overflow-x-auto border-t border-slate-200 bg-slate-900 px-4 py-4 text-xs text-emerald-300">
-                {JSON.stringify(coupons, null, 2)}
+                {JSON.stringify(coupons.map(toApiCoupon), null, 2)}
               </pre>
             )}
           </div>
